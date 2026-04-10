@@ -125,6 +125,35 @@ __global__ void kernel_attn_softmax_v(const float* Scores, const float* V, float
     }
 }
 
+// Inverse Embedding: Find the byte (0-255) that most closely matches the output vector
+__global__ void kernel_decode_token(const float* X_last, uint8_t* out_token, int d_model) {
+    __shared__ float s_dist[256];
+    int tid = threadIdx.x;
+    if (tid >= 256) return;
+
+    float dist = 0;
+    for (int i = 0; i < d_model; i++) {
+        float seed = (float)tid * 0.123f + (float)i * 0.456f;
+        float target = sinf(seed);
+        float diff = X_last[i] - target;
+        dist += diff * diff;
+    }
+    s_dist[tid] = dist;
+    __syncthreads();
+
+    if (tid == 0) {
+        float min_dist = 1e38f;
+        int best_token = 0;
+        for (int i = 0; i < 256; i++) {
+            if (s_dist[i] < min_dist) {
+                min_dist = s_dist[i];
+                best_token = i;
+            }
+        }
+        *out_token = (uint8_t)best_token;
+    }
+}
+
 // Tiled FFN Up-Projection
 __global__ void kernel_ffn_up_tiled_05bit(const float* X, const uint32_t* W, float* Mid, int layer, int d_model, int d_ff, int seq_len) {
     __shared__ float s_X[32][32];
@@ -266,6 +295,36 @@ public:
         printf("[SUCCESS]: BRAIN RECALLED. Ready for Sovereign Inference.\n"); fflush(stdout);
     }
 
+    void generate(int tokens_to_gen) {
+        printf("[SOVEREIGN THOUGHT]: Starting generation...\n"); fflush(stdout);
+        uint8_t* d_pred;
+        CUDA_CHECK(cudaMalloc(&d_pred, 1));
+        
+        for (int i = 0; i < tokens_to_gen; i++) {
+            this->forward();
+            // Decode last token of the final layer
+            kernel_decode_token<<<1, 256>>>(d_X + (cfg.seq_len - 1) * cfg.d_model, d_pred, cfg.d_model);
+            
+            uint8_t h_pred;
+            CUDA_CHECK(cudaMemcpy(&h_pred, d_pred, 1, cudaMemcpyDeviceToHost));
+            printf("0x%02X ", h_pred); fflush(stdout);
+
+            // Shifting context window: [1:] = [:-1]
+            // We use overlapping copy for simplicity, but strictly d_tokens[0...seq-2] = d_tokens[1...seq-1]
+            uint8_t* h_tokens = new uint8_t[cfg.seq_len];
+            CUDA_CHECK(cudaMemcpy(h_tokens, d_tokens, cfg.seq_len, cudaMemcpyDeviceToHost));
+            for (int t = 0; t < cfg.seq_len - 1; t++) h_tokens[t] = h_tokens[t+1];
+            h_tokens[cfg.seq_len - 1] = h_pred;
+            CUDA_CHECK(cudaMemcpy(d_tokens, h_tokens, cfg.seq_len, cudaMemcpyHostToDevice));
+            delete[] h_tokens;
+
+            // Re-embed the updated context
+            kernel_embed_data<<<(cfg.seq_len + 255)/256, 256>>>(d_tokens, d_X, cfg.d_model, cfg.seq_len);
+        }
+        printf("\n[SUCCESS]: GENERATION COMPLETE.\n"); fflush(stdout);
+        CUDA_CHECK(cudaFree(d_pred));
+    }
+
     void load_dataset(std::string path) {
         printf("[SYSTEM]: Opening dataset %s...\n", path.c_str()); fflush(stdout);
         std::ifstream file(path, std::ios::binary | std::ios::ate);
@@ -341,5 +400,6 @@ int main() {
     engine.train(2000);
     engine.save_brain("sovereign_ultimate.sov");
     printf("[DONE]: HARDENED BRAIN ESTABLISHED.\n"); fflush(stdout);
+    engine.generate(16);
     return 0;
 }
