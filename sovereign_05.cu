@@ -209,6 +209,7 @@ public:
         CUDA_CHECK(cudaDeviceSynchronize());
         
         load_dataset("sovereign_100.bin");
+        load_brain("sovereign_ultimate.sov");
     }
 
     void save_brain(std::string path) {
@@ -236,6 +237,33 @@ public:
             save_mat(d_W_down[l], w_ff_size);
         }
         printf("[SUCCESS]: BRAIN SAVED. Total Size: %llu bytes\n", (unsigned long long)file.tellp()); fflush(stdout);
+    }
+
+    void load_brain(std::string path) {
+        printf("[SYSTEM]: Recalling Hardened Brain from %s...\n", path.c_str()); fflush(stdout);
+        std::ifstream file(path, std::ios::binary);
+        if (!file) {
+            printf("[WARNING]: No brain found at %s. Initializing from Noise.\n", path.c_str()); fflush(stdout);
+            return;
+        }
+
+        int w_qkv_size = (cfg.d_model * cfg.d_model / 2 + 31) / 32;
+        int w_ff_size = (cfg.d_model * cfg.d_ff / 2 + 31) / 32;
+
+        std::vector<uint32_t> buffer;
+        for (int l = 0; l < cfg.num_layers; l++) {
+            auto load_mat = [&](uint32_t* d_weight, int size) {
+                buffer.resize(size);
+                file.read((char*)buffer.data(), size * 4);
+                CUDA_CHECK(cudaMemcpy(d_weight, buffer.data(), size * 4, cudaMemcpyHostToDevice));
+            };
+            load_mat(d_W_q[l], w_qkv_size);
+            load_mat(d_W_k[l], w_qkv_size);
+            load_mat(d_W_v[l], w_qkv_size);
+            load_mat(d_W_up[l], w_ff_size);
+            load_mat(d_W_down[l], w_ff_size);
+        }
+        printf("[SUCCESS]: BRAIN RECALLED. Ready for Sovereign Inference.\n"); fflush(stdout);
     }
 
     void load_dataset(std::string path) {
