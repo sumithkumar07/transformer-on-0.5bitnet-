@@ -7,6 +7,7 @@
 #include <fstream>
 #include <string>
 #include <ctime>
+#include <iterator>
 
 #define CUDA_CHECK(err) { \
     if (err != cudaSuccess) { \
@@ -99,6 +100,17 @@ __global__ void kernel_ffn_up_tiled_05bit(const float* X, const uint32_t* W, flo
     if (row < seq_len && col < d_ff) Mid[row * d_ff + col] = tanhf(sum);
 }
 
+__global__ void kernel_embed_data(const uint8_t* tokens, float* X, int d_model, int seq_len) {
+    int t_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t_idx < seq_len) {
+        float val = (float)tokens[t_idx] / 128.0f - 1.0f; // Basic 8-bit normalization
+        for (int i = 0; i < d_model; i++) {
+            // Deterministic Projection: Each token spreads uniquely across d_model
+            X[t_idx * d_model + i] = val * (float)scramble_sig(i, tokens[t_idx], 0);
+        }
+    }
+}
+
 // Loss Injection: Computing actual d_Error signal
 __global__ void kernel_compute_loss(float* X, float* Error, int d_model, int seq_len) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -125,8 +137,10 @@ public:
     SovereignConfig cfg;
     std::vector<uint32_t*> d_W_q, d_W_k, d_W_v, d_W_up, d_W_down;
     float *d_X, *d_Q, *d_K, *d_V, *d_FF_mid, *d_FF_out, *d_Error;
+    uint8_t *d_tokens;
     curandState *d_state;
     unsigned long long *d_flip_count;
+    std::vector<uint8_t> h_dataset;
 
     SovereignEngine() {
         int w_qkv = (cfg.d_model * cfg.d_model / 2 + 31) / 32;
@@ -148,14 +162,39 @@ public:
         CUDA_CHECK(cudaMalloc(&d_state, 2097152 * sizeof(curandState)));
         CUDA_CHECK(cudaMalloc(&d_flip_count, sizeof(unsigned long long)));
         CUDA_CHECK(cudaMemset(d_flip_count, 0, sizeof(unsigned long long)));
+        CUDA_CHECK(cudaMalloc(&d_tokens, cfg.seq_len));
         kernel_setup_curand<<<8192, 256>>>(d_state, time(NULL));
         CUDA_CHECK(cudaDeviceSynchronize());
-        // Seed massive random entropy completed.
+        
+        load_dataset("sovereign_100.bin");
+    }
+
+    void load_dataset(std::string path) {
+        printf("[SYSTEM]: Opening dataset %s...\n", path.c_str()); fflush(stdout);
+        std::ifstream file(path, std::ios::binary | std::ios::ate);
+        if (!file) {
+            printf("[WARNING]: Dataset %s not found. Training on internal entropy.\n", path.c_str()); fflush(stdout);
+            return;
+        }
+        std::streamsize size = file.tellg();
+        file.seekg(0, std::ios::beg);
+        h_dataset.resize(size);
+        if (file.read((char*)h_dataset.data(), size)) {
+            printf("[SUCCESS]: Loaded %llu bytes from %s\n", (unsigned long long)size, path.c_str()); fflush(stdout);
+        }
     }
 
     void train(int steps) {
-        printf("[HARDENED]: Launching Learning-Active Transformer...\n");
+        printf("[HARDENED]: Launching Learning-Active Transformer...\n"); fflush(stdout);
+        if (h_dataset.empty()) printf("[WARNING]: NO DATA. Engine training on noise.\n");
+        fflush(stdout);
+        std::mt19937 rng(42);
         for (int step = 0; step < steps + 1; step++) {
+            if (!h_dataset.empty()) {
+                int offset = rng() % (h_dataset.size() - cfg.seq_len);
+                CUDA_CHECK(cudaMemcpy(d_tokens, h_dataset.data() + offset, cfg.seq_len, cudaMemcpyHostToDevice));
+                kernel_embed_data<<<(cfg.seq_len + 255)/256, 256>>>(d_tokens, d_X, cfg.d_model, cfg.seq_len);
+            }
             this->forward();
             kernel_compute_loss<<<(cfg.seq_len + 255) / 256, 256>>>(d_X, d_Error, cfg.d_model, cfg.seq_len);
             int w_qkv = cfg.d_model * cfg.d_model;
@@ -186,8 +225,10 @@ int main() {
     printf("==========================================\n");
     printf("SOVEREIGN 0.5-BIT PHASE 14: MASTER SYNTHESIS\n");
     printf("==========================================\n");
+    printf("[SYSTEM]: Initializing Engine Core...\n"); fflush(stdout);
     SovereignEngine engine;
+    printf("[SYSTEM]: Core Ready. Starting Training...\n"); fflush(stdout);
     engine.train(2000);
-    printf("[DONE]: HARDENED BRAIN ESTABLISHED.\n");
+    printf("[DONE]: HARDENED BRAIN ESTABLISHED.\n"); fflush(stdout);
     return 0;
 }
