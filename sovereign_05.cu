@@ -211,6 +211,33 @@ public:
         load_dataset("sovereign_100.bin");
     }
 
+    void save_brain(std::string path) {
+        printf("[SYSTEM]: Saving Hardened Brain to %s...\n", path.c_str()); fflush(stdout);
+        std::ofstream file(path, std::ios::binary);
+        if (!file) {
+            printf("[ERROR]: Could not open %s for writing.\n", path.c_str());
+            return;
+        }
+
+        int w_qkv_size = (cfg.d_model * cfg.d_model / 2 + 31) / 32;
+        int w_ff_size = (cfg.d_model * cfg.d_ff / 2 + 31) / 32;
+
+        std::vector<uint32_t> buffer;
+        for (int l = 0; l < cfg.num_layers; l++) {
+            auto save_mat = [&](uint32_t* d_weight, int size) {
+                buffer.resize(size);
+                CUDA_CHECK(cudaMemcpy(buffer.data(), d_weight, size * 4, cudaMemcpyDeviceToHost));
+                file.write((char*)buffer.data(), size * 4);
+            };
+            save_mat(d_W_q[l], w_qkv_size);
+            save_mat(d_W_k[l], w_qkv_size);
+            save_mat(d_W_v[l], w_qkv_size);
+            save_mat(d_W_up[l], w_ff_size);
+            save_mat(d_W_down[l], w_ff_size);
+        }
+        printf("[SUCCESS]: BRAIN SAVED. Total Size: %llu bytes\n", (unsigned long long)file.tellp()); fflush(stdout);
+    }
+
     void load_dataset(std::string path) {
         printf("[SYSTEM]: Opening dataset %s...\n", path.c_str()); fflush(stdout);
         std::ifstream file(path, std::ios::binary | std::ios::ate);
@@ -284,6 +311,7 @@ int main() {
     SovereignEngine engine;
     printf("[SYSTEM]: Core Ready. Starting Training...\n"); fflush(stdout);
     engine.train(2000);
+    engine.save_brain("sovereign_ultimate.sov");
     printf("[DONE]: HARDENED BRAIN ESTABLISHED.\n"); fflush(stdout);
     return 0;
 }
